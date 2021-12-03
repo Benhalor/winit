@@ -13,7 +13,7 @@ use super::{app_state::AppState, event::EventWrapper, util, DEVICE_ID};
 use crate::event::{DeviceEvent, ElementState, Event};
 
 pub struct AppClass(pub *const Class);
-unsafe impl Send for AppClass {}
+unsafe impl Send for AppClass {} 
 unsafe impl Sync for AppClass {}
 
 lazy_static! {

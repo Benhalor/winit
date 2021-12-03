@@ -23,3 +23,4 @@ pub mod windows;
 
 pub mod run_return;
 pub mod web;
+pub mod emscripten;

@@ -21,8 +21,11 @@ mod platform;
 #[cfg(target_os = "ios")]
 #[path = "ios/mod.rs"]
 mod platform;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 #[path = "web/mod.rs"]
+mod platform;
+#[cfg(all(target_arch = "wasm32", target_os = "emscripten"))]
+#[path = "emscripten/mod.rs"]
 mod platform;
 
 #[cfg(all(

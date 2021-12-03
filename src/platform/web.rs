@@ -1,4 +1,4 @@
-#![cfg(target_arch = "wasm32")]
+#![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 
 //! The web target does not automatically insert the canvas element object into the web page, to
 //! allow end users to determine how the page should be laid out. Use the `WindowExtWebSys` trait
