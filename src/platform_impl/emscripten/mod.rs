@@ -1,6 +1,7 @@
 #![cfg(target_os = "emscripten")]
 
 mod ffi;
+mod monitor;
 
 use std::{mem, ptr, str};
 use std::cell::RefCell;
@@ -9,14 +10,20 @@ use std::os::raw::{c_char, c_void, c_double, c_ulong, c_int};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, Arc};
 
-use crate::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, Position, PhysicalSize, Size};
+use std::{
+     sync::mpsc::{Receiver, Sender},
+};
+use std::collections::vec_deque::IntoIter as VecDequeIter;
+
+use crate::dpi::{LogicalPosition, LogicalSize, Position, PhysicalSize, Size};
 use crate::window::{Icon,
-        CursorIcon, Fullscreen, UserAttentionType, WindowAttributes, WindowId as RootWindowId,
+        CursorIcon, WindowAttributes,
     };
-use crate::window::MonitorHandle as RootMonitorHandle;
 use crate::event::{DeviceEvent, ElementState,MouseButton, KeyboardInput, Touch, ModifiersState, TouchPhase, Event, WindowEvent};
-use crate::event_loop::{self, ControlFlow};
+use crate::event_loop::{ControlFlow, EventLoopClosed};
 use crate::event::VirtualKeyCode;
+use crate::monitor::MonitorHandle as RootMH;
+pub use self::monitor::{ Mode as VideoMode};
 
 #[derive(Default, Clone, Debug)]
 pub struct OsError;
@@ -99,34 +106,66 @@ pub fn set_main_loop_callback<F>(callback : F) where F : FnMut() {
 }
 
 #[derive(Clone)]
-pub struct EventsLoopProxy;
+pub struct EventLoopProxy<T: 'static>{
+    queue: Arc<Mutex<VecDeque<T>>>,//todo remove
+}
 
-impl EventsLoopProxy {
-    pub fn wakeup(&self) -> Result<(), EventsLoopClosed> {
+impl<T: 'static> EventLoopProxy<T> {
+    
+    pub fn wakeup(&self) -> Result<(), EventLoopClosed<T>> {
         unimplemented!()
+    }
+    pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {//todo remove
+        self.queue.lock().unwrap().push_back(event);
+        Ok(())
     }
 }
 
-pub struct EventsLoop {
-    window: Mutex<Option<Arc<Window2>>>,
-    interrupted: AtomicBool,
+pub struct EventLoopWindowTarget<T: 'static> {
+    receiver: Receiver<T>,
+    sender_to_clone: Sender<T>,
 }
 
-impl EventsLoop {
-    pub fn new() -> EventsLoop {
-        EventsLoop {
+impl<T: 'static> EventLoopWindowTarget<T> {
+    pub fn available_monitors(&self) -> VecDequeIter<monitor::Handle> {
+        VecDeque::new().into_iter()
+    }
+
+    pub fn primary_monitor(&self) -> Option<RootMH> {
+        Some(RootMH {
+            inner: monitor::Handle,
+        })
+    }
+}
+
+
+
+
+pub struct EventLoop <T: 'static>{
+    window: Mutex<Option<Arc<Window2>>>,
+    interrupted: AtomicBool,
+    queue: Arc<Mutex<VecDeque<T>>>,//todo remove
+}
+
+impl<T> EventLoop<T>  {
+    pub fn new() -> Self {
+        EventLoop {
             window: Mutex::new(None),
             interrupted: AtomicBool::new(false),
         }
     }
-
+    pub fn send_event(&self, event: T) -> Result<(), EventLoopClosed<T>> {//todo remove
+        self.queue.lock().unwrap().push_back(event);
+        Ok(())
+    }
+    
     #[inline]
     pub fn interrupt(&self) {
         self.interrupted.store(true, Ordering::Relaxed);
     }
 
     #[inline]
-    pub fn create_proxy(&self) -> EventsLoopProxy {
+    pub fn create_proxy(&self) -> EventLoopProxy<T> {
         unimplemented!()
     }
 
@@ -143,7 +182,7 @@ impl EventsLoop {
     }
 
     pub fn poll_events<F>(&self, mut callback: F)
-        where F: FnMut(Event)
+        where F: FnMut(Event<'_, T>)
     {
         let ref mut window = *self.window.lock().unwrap();
         if let &mut Some(ref mut window) = window {
@@ -154,7 +193,7 @@ impl EventsLoop {
     }
 
     pub fn run_forever<F>(&self, mut callback: F)
-        where F: FnMut(Event) -> ControlFlow
+        where F: FnMut(Event<'_, T>) -> ControlFlow
     {
         self.interrupted.store(false, Ordering::Relaxed);
 
@@ -183,7 +222,7 @@ pub struct Window2 {
     cursor_grabbed: Mutex<bool>,
     cursor_hidden: Mutex<bool>,
     is_fullscreen: bool,
-    events: Box<Mutex<VecDeque<Event>>>,
+    //events: Box<Mutex<VecDeque<Event<'static,T>>>>,
 }
 
 pub struct Window {
@@ -215,7 +254,7 @@ extern "C" fn mouse_callback(
     event_queue: *mut c_void) -> ffi::EM_BOOL
 {
     unsafe {
-        let queue: &Mutex<VecDeque<Event>> = mem::transmute(event_queue);
+        let queue: &Mutex<VecDeque<Event<'_>>> = mem::transmute(event_queue);
 
         let modifiers = ModifiersState {
             shift: (*event).shiftKey == ffi::EM_TRUE,
@@ -282,7 +321,7 @@ extern "C" fn keyboard_callback(
     event_queue: *mut c_void) -> ffi::EM_BOOL
 {
     unsafe {
-        let queue: &Mutex<VecDeque<Event>> = mem::transmute(event_queue);
+        let queue: &Mutex<VecDeque<Event<'_>>> = mem::transmute(event_queue);
 
         let modifiers = ModifiersState {
             shift: (*event).shiftKey == ffi::EM_TRUE,
@@ -333,7 +372,7 @@ extern fn touch_callback(
     event_queue: *mut c_void) -> ffi::EM_BOOL
 {
     unsafe {
-        let queue: &Mutex<VecDeque<Event>> = mem::transmute(event_queue);
+        let queue: &Mutex<VecDeque<Event <'_>>> = mem::transmute(event_queue);
 
         let phase = match event_type {
             ffi::EMSCRIPTEN_EVENT_TOUCHSTART => TouchPhase::Started,
@@ -396,7 +435,7 @@ fn em_try(res: ffi::EMSCRIPTEN_RESULT) -> Result<(), String> {
 }
 
 impl Window {
-    pub fn new(events_loop: &EventsLoop, attribs: WindowAttributes,
+    pub fn new<T>(events_loop: &EventLoop<T>, attribs: WindowAttributes,
                _pl_attribs: PlatformSpecificWindowBuilderAttributes)
         -> Result<Window, OsError>
     {
@@ -630,8 +669,8 @@ impl Window {
     }
 
     #[inline]
-    pub fn get_current_monitor(&self) -> RootMonitorHandle {
-        RootMonitorHandle { inner: MonitorHandle }
+    pub fn get_current_monitor(&self) -> RootMH {
+        RootMH { inner: MonitorHandle }
     }
 
     #[inline]
